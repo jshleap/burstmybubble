@@ -8,35 +8,23 @@ __version__ = '0.1b'
 
 
 import os
-import nltk
-import numpy as np
-import pandas as pd
-from glob import glob
-from nltk.stem import PorterStemmer
-from nltk.tokenize import sent_tokenize, word_tokenize, RegexpTokenizer
-from nltk.probability import FreqDist
-from nltk.corpus import stopwords
-from nltk.stem.wordnet import WordNetLemmatizer
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
-from bokeh.plotting import figure, show, output_file, ColumnDataSource, save
-from bokeh.io import output_notebook
-from bokeh.models import HoverTool
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-from collections import ChainMap, defaultdict
 import sqlite3
+import argparse
+from glob import glob
 
-data_path = '../data/raw/convote_v1.1/data_stage_two/development_set'
-files = glob(os.path.join(data_path, '*.txt'))
-
+import pandas as pd
+from bokeh.plotting import figure, output_file, ColumnDataSource, save
+from nltk.tokenize import RegexpTokenizer
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as Lda
+from sklearn.feature_extraction.text import CountVectorizer
 
 
 class process_n_train(object):
     def __init__(self, data_path, ngram, type='cornell'):
         """
         Class to process speech usinh NLP (ngram), remove invariants,
-        and train a LDA model
+        and train a Lda model
         :param data_path: Path to where the textfiles are
         """
         self.data_path = data_path
@@ -54,6 +42,7 @@ class process_n_train(object):
         self.bow = ngram
         self.lda_transf = None
         self.lda_fit = None
+        self.pca_array = None
         self.lda()
 
     @property
@@ -102,13 +91,13 @@ class process_n_train(object):
             parties.append(parts[-1][0])
             with open(filename) as text:
                 sentences.append(text.read())
-        self.bias = parties
         return parties, sentences, info
 
     def read_db_table(self):
         """
         Read table from Fake news detection, Google Summer of Code 2017
-        http://www.newsaudit.net
+        http://www.newsaudit.net. This is a different dataset from that
+        explained in the readme.
         :return: tuple with political bias list, list of documents, and info
         """
         db = sqlite3.connect(self.files)
@@ -129,6 +118,7 @@ class process_n_train(object):
                                                    self.bow.shape[1]))
         pca = PCA(n_components=2)
         self.pca_array = pca.fit_transform(self.bow)
+        self.pca_bokeh_plot(plot='pca')
 
     def lda(self):
         """
@@ -137,9 +127,10 @@ class process_n_train(object):
         """
         print('Data has %d rows and %d columns' % (self.bow.shape[0],
                                                    self.bow.shape[1]))
-        lda = LDA(n_components=None)
+        lda = Lda(n_components=None)
         self.lda_fit = lda.fit(self.bow, y=self.bias)
         self.lda_transf = self.lda_fit.transform(self.bow)
+        self.pca_bokeh_plot()
 
     def pca_bokeh_plot(self, plot='lda'):
         """
@@ -173,3 +164,21 @@ class process_n_train(object):
         p.yaxis.axis_label = ylabel
         output_file('%s_plot.bokeh' % plot)
         save(p)
+
+
+def main(data_path, ngram):
+    train = process_n_train(data_path, ngram)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        prog='PROG', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('data_path', help='path to data',
+                        default='../data/raw/convote_v1.1/data_stage_two/'
+                                'development_set')
+    parser.add_argument('--ngram', type=tuple, nargs=2,
+                        help='ngrams to use. This takes to values for the '
+                             'range of ngrams to be explored'
+                        )
+    args = parser.parse_args()
+    main(args.data_path, args.ngram)
