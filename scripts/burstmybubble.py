@@ -14,28 +14,67 @@ from glob import glob
 
 import pandas as pd
 from bokeh.plotting import figure, output_file, ColumnDataSource, save
+from bokeh.palettes import Spectral5
+from bokeh.transform import factor_cmap
+from bokeh.io import export_png
 from nltk.tokenize import RegexpTokenizer
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as Lda
 from sklearn.feature_extraction.text import CountVectorizer
+from collections import defaultdict
+
+
+def explore_csv(csv, outprefix):
+    """
+    Explore a csv file with a dataframe wiith the following columns:
+    'Title', 'Content', 'Objectivism', 'Outlet', 'Bias'
+    :param outprefix: prefix of output plot
+    :param csv: csv filename
+    :return:
+    """
+    df = pd.read_csv(csv, header=None, names=[
+        'Title', 'Content', 'Objectivism', 'Outlet', 'Bias'])
+    gr = df.groupby('Bias')['Title'].size()
+    source = ColumnDataSource({'Bias': gr.index.tolist(), 'count': gr.values})
+    try:
+        bias = source.data['Bias'].tolist()
+    except AttributeError:
+        bias = source.data['Bias']
+    if all([str(i).isdigit() for i in bias]):
+        # Categories are numeric and need to be categorical. For the training
+        # set of the all news 0: neutral, 1: left, 2: right
+        d = {0: 'neutral', 1: 'left', 2: 'right'}
+        bias = [d[x] for x in bias]
+        source.data['Bias'] = bias
+    p = figure(x_range=bias)
+    color_map = factor_cmap(field_name='Bias', palette=Spectral5, factors=bias)
+    p.vbar(x='Bias', top='count', source=source, width=0.70, color=color_map)
+    p.title.text = "Publications per bias in %s" % csv
+    p.xaxis.axis_label = 'Bias'
+    p.yaxis.axis_label = 'Number of publications'
+    # remove toolbar (no point in still image)
+    p.toolbar.logo = None
+    p.toolbar_location = None
+    export_png(p, filename="%s.png" % outprefix)
 
 
 class process_n_train(object):
-    def __init__(self, data_path, ngram, type='cornell'):
+    def __init__(self, data_path, ngram, input_type='cornell', sample=False):
         """
         Class to process speech usinh NLP (ngram), remove invariants,
         and train a Lda model
         :param data_path: Path to where the textfiles are
         """
+        self.sample = sample
         self.data_path = data_path
-        if type == 'cornell':
+        if input_type == 'cornell':
             # assume multiple files formatted as convote
             self.files = glob(os.path.join(data_path, '*.txt'))
         else:
-            assert data_path.endswith('db')
+            assert (data_path.endswith('db') or data_path.endswith('csv'))
             self.files = data_path
+        self.input_type = input_type
         self.tokenizer = RegexpTokenizer(r'\w+')
-        self.type = type
         self.bias = None
         self.info = {}
         self.sentences = self.files
@@ -43,6 +82,7 @@ class process_n_train(object):
         self.lda_transf = None
         self.lda_fit = None
         self.pca_array = None
+        self.pca()
         self.lda()
 
     @property
@@ -51,8 +91,18 @@ class process_n_train(object):
 
     @sentences.setter
     def sentences(self, files):
-        if self.type == 'cornell':
+        if self.input_type == 'cornell':
+            # Cornell-type input assumes a directory with multiple txt files
             self.bias, self.__sentences, self.info = self.read_files_cornell()
+            # Transform the list of dictionary into a dictionary of lists
+            temp = defaultdict(list)
+            for element in self.info:
+                for k, v in element.items():
+                    temp[k].append(v)
+            self.info = temp
+        elif self.input_type == 'news_audit':
+            # News_audit assumes a csv file (see readme in github)
+            self.bias, self.__sentences, self.info = self.read_csv_table()
         else:
             self.bias, self.__sentences, self.info = self.read_db_table()
 
@@ -70,7 +120,11 @@ class process_n_train(object):
             tokenizer=self.tokenizer.tokenize
         )
         text_counts = cv.fit_transform(self.sentences)
-        self.__bow = pd.DataFrame(text_counts.toarray())
+        if self.sample:
+            df = pd.DataFrame(text_counts.toarray()).sample(frac=0.01, axis=1)
+        else:
+            df = pd.DataFrame(text_counts.toarray())
+        self.__bow = df
 
     def read_files_cornell(self):
         """
@@ -92,6 +146,25 @@ class process_n_train(object):
             with open(filename) as text:
                 sentences.append(text.read())
         return parties, sentences, info
+
+    def read_csv_table(self):
+        """
+        Helper to read news_audit-formatted csv files
+        :return: tuple with political bias list, list of documents, and info
+        """
+        df = pd.read_csv(self.files, header=None, names=[
+            'Title', 'Content', 'Objectivism', 'Outlet', 'Bias'])
+        df = df.dropna(subset=['Content'])
+        if all([str(i).isdigit() for i in df.Bias]):
+            # Categories are numeric and need to be categorical. For the
+            # training set of the all news 0: neutral, 1: left, 2: right
+            d = {0: 'neutral', 1: 'left', 2: 'right'}
+            df.Bias = [d[x] for x in df.Bias]
+        if self.sample:
+            df = df.sample(frac=0.1)
+        info = {'Objectivism': df.Objectivism, 'Outlet': df.Outlet,
+                'Title': df.Title}
+        return df.Bias, df.Content, info
 
     def read_db_table(self):
         """
@@ -137,7 +210,7 @@ class process_n_train(object):
         Interactive PCA plot using Bokeh
         """
         colors = ['crimson', 'navy', 'green']
-        colors = dict(zip(colors, self.bias))
+        colors = dict(zip(set(self.bias), colors))
         if plot == 'lda':
             t_pca = self.lda_transf
         else:
@@ -152,7 +225,7 @@ class process_n_train(object):
             ylabel = 'Dimension 2'
         # Set the information to be displayed in the interactive plot
         d.update(self.info)
-        d['colors'] = colors
+        d['colors'] = [colors[b] for b in self.bias]
         source = ColumnDataSource(data=d)
         TOOLTIPS = [("index", "$index"), ("(x,y)", "($x, $y)")] + \
                    [(k, '@%s' % k) for k in d.keys() if
@@ -162,12 +235,13 @@ class process_n_train(object):
                   fill_alpha=0.6, line_color=None)
         p.xaxis.axis_label = xlabel
         p.yaxis.axis_label = ylabel
-        output_file('%s_plot.bokeh' % plot)
+        output_file('%s_%s_plot.bokeh.html' % (self.input_type, plot), mode='inline')
         save(p)
 
 
-def main(data_path, ngram):
-    train = process_n_train(data_path, ngram)
+def main(data_path, ngram, input_type, sample):
+    train = process_n_train(data_path, ngram, input_type=input_type,
+                            sample=sample)
 
 
 if __name__ == '__main__':
@@ -176,9 +250,14 @@ if __name__ == '__main__':
     parser.add_argument('data_path', help='path to data',
                         default='../data/raw/convote_v1.1/data_stage_two/'
                                 'development_set')
-    parser.add_argument('--ngram', type=tuple, nargs=2,
+    parser.add_argument('--ngram', type=int, nargs=2,
                         help='ngrams to use. This takes to values for the '
-                             'range of ngrams to be explored'
-                        )
+                             'range of ngrams to be explored')
+    parser.add_argument('--input_type', default='cornell',
+                        help='Kind of input. For now only cornell and '
+                             'news_audit (see readme on github)')
+    parser.add_argument('--sample', action='store_true', default=False,
+                        help='Sample BOW to 10% for testing purposes')
     args = parser.parse_args()
-    main(args.data_path, args.ngram)
+    main(args.data_path, tuple(args.ngram), args.input_type, sample=args.sample
+         )
